@@ -1,1 +1,2 @@
 bge_small_en_v15/model.onnx filter=lfs diff=lfs merge=lfs -text
+*.onnx filter=lfs diff=lfs merge=lfs -text

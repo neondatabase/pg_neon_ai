@@ -7,7 +7,7 @@ pgrx::pg_module_magic!();
 
 extension_sql_file!("lib.sql");
 
-const ERR_PREFIX: &str = "[NEON_AI]";
+const ERR_PREFIX: &'static str = "[NEON_AI]";
 
 #[pg_extern]
 fn hello_neon_ai() -> &'static str {
@@ -43,24 +43,24 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
 #[pg_extern]
 fn embedding_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
     thread_local! {
-        static model_cell: OnceCell<TextEmbedding> = const { OnceCell::new() };
+        static MODEL_CELL: OnceCell<TextEmbedding> = const { OnceCell::new() };
     }
-    model_cell.with(|cell| {
+    MODEL_CELL.with(|cell| {
         let model = cell.get_or_init(|| {
-            let tokenizer_files = TokenizerFiles {
-                tokenizer_file: include_bytes!("../bge_small_en_v15/tokenizer.json").to_vec(),
-                config_file: include_bytes!("../bge_small_en_v15/config.json").to_vec(),
-                special_tokens_map_file: include_bytes!(
-                    "../bge_small_en_v15/special_tokens_map.json"
-                )
-                .to_vec(),
-                tokenizer_config_file: include_bytes!("../bge_small_en_v15/tokenizer_config.json")
-                    .to_vec(),
-            };
+            let onnx_file = include_bytes!("../bge_small_en_v15/model.onnx").to_vec();
+            let tokenizer_file = include_bytes!("../bge_small_en_v15/tokenizer.json").to_vec();
+            let config_file = include_bytes!("../bge_small_en_v15/config.json").to_vec();
+            let special_tokens_map_file = include_bytes!("../bge_small_en_v15/special_tokens_map.json").to_vec();
+            let tokenizer_config_file = include_bytes!("../bge_small_en_v15/tokenizer_config.json").to_vec();
 
-            let user_def_model: UserDefinedEmbeddingModel = UserDefinedEmbeddingModel {
-                onnx_file: include_bytes!("../bge_small_en_v15/model.onnx").to_vec(),
-                tokenizer_files: tokenizer_files,
+            let user_def_model = UserDefinedEmbeddingModel {
+                onnx_file,
+                tokenizer_files: TokenizerFiles {
+                    tokenizer_file,
+                    config_file,
+                    special_tokens_map_file,
+                    tokenizer_config_file,
+                },
             };
 
             match TextEmbedding::try_new_from_user_defined(user_def_model, Default::default()) {
