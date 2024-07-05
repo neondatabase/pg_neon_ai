@@ -40,14 +40,13 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
     }
 }
 
-thread_local! {
-    static MODEL_CELL: OnceCell<TextEmbedding> = OnceCell::new();
-}
-
 #[pg_extern]
 fn embedding_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
-    let model = MODEL_CELL.with(|model_cell| {
-        model_cell.get_or_init(|| {
+    thread_local! {
+        static model_cell: OnceCell<TextEmbedding> = const { OnceCell::new() };
+    }
+    let model = model_cell.with(|cell| {
+        cell.get_or_init(|| {
             let tokenizer_files = TokenizerFiles {
                 tokenizer_file: include_bytes!("../bge_small_en_v15/tokenizer.json").to_vec(),
                 config_file: include_bytes!("../bge_small_en_v15/config.json").to_vec(),
