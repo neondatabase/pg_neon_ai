@@ -45,8 +45,8 @@ fn embedding_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
     thread_local! {
         static model_cell: OnceCell<TextEmbedding> = const { OnceCell::new() };
     }
-    let model = model_cell.with(|cell| {
-        cell.get_or_init(|| {
+    model_cell.with(|cell| {
+        let model = cell.get_or_init(|| {
             let tokenizer_files = TokenizerFiles {
                 tokenizer_file: include_bytes!("../bge_small_en_v15/tokenizer.json").to_vec(),
                 config_file: include_bytes!("../bge_small_en_v15/config.json").to_vec(),
@@ -69,17 +69,15 @@ fn embedding_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
                 }
                 Ok(result) => result,
             }
-        })
-    });
+        });
 
-    let embeddings = match model.embed(input, None) {
-        Err(err) => {
-            error!("{ERR_PREFIX} Unable to generate bge_small_en_v15 embeddings: {err}",);
+        match model.embed(input, None) {
+            Err(err) => {
+                error!("{ERR_PREFIX} Unable to generate bge_small_en_v15 embeddings: {err}",);
+            }
+            Ok(result) => result,
         }
-        Ok(result) => result,
-    };
-
-    embeddings
+    })
 }
 
 // this downloads the model on-the-fly
