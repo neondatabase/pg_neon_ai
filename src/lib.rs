@@ -1,6 +1,7 @@
 // use fastembed::{EmbeddingModel, InitOptions, TokenizerFiles}
-use fastembed::{UserDefinedEmbeddingModel, TextEmbedding, TokenizerFiles};
+use fastembed::{TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
 use pgrx::prelude::*;
+use std::cell::OnceCell;
 
 pgrx::pg_module_magic!();
 
@@ -39,36 +40,39 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
     }
 }
 
+thread_local! {
+    static MODEL_CELL: OnceCell<TextEmbedding> = OnceCell::new();
+}
+
 #[pg_extern]
 fn embedding_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
-    let tokenizer_files = TokenizerFiles {
-        tokenizer_file: include_bytes!("../bge_small_en_v15/tokenizer.json").to_vec(),
-        config_file: include_bytes!("../bge_small_en_v15/config.json").to_vec(),
-        special_tokens_map_file: include_bytes!("../bge_small_en_v15/special_tokens_map.json")
-            .to_vec(),
-        tokenizer_config_file: include_bytes!("../bge_small_en_v15/tokenizer_config.json").to_vec(),
-    };
+    let model = MODEL_CELL.with(|model_cell| {
+        model_cell.get_or_init(|| {
+            let tokenizer_files = TokenizerFiles {
+                tokenizer_file: include_bytes!("../bge_small_en_v15/tokenizer.json").to_vec(),
+                config_file: include_bytes!("../bge_small_en_v15/config.json").to_vec(),
+                special_tokens_map_file: include_bytes!(
+                    "../bge_small_en_v15/special_tokens_map.json"
+                )
+                .to_vec(),
+                tokenizer_config_file: include_bytes!("../bge_small_en_v15/tokenizer_config.json")
+                    .to_vec(),
+            };
 
-    let user_def_model = UserDefinedEmbeddingModel {
-        onnx_file: include_bytes!("../bge_small_en_v15/model.onnx").to_vec(),
-        tokenizer_files: tokenizer_files,
-    };
+            let user_def_model: UserDefinedEmbeddingModel = UserDefinedEmbeddingModel {
+                onnx_file: include_bytes!("../bge_small_en_v15/model.onnx").to_vec(),
+                tokenizer_files: tokenizer_files,
+            };
 
-    // this downloads the model on-the-fly
-    // let model = match TextEmbedding::try_new(InitOptions {
-    //     model_name: EmbeddingModel::BGESmallENV15,
-    //     show_download_progress: false,
-    //     ..Default::default()
-    // }) {
+            match TextEmbedding::try_new_from_user_defined(user_def_model, Default::default()) {
+                Err(err) => {
+                    error!("{ERR_PREFIX} Couldn't load model bge_small_en_v15: {err}");
+                }
+                Ok(result) => result,
+            }
+        })
+    });
 
-    let model = match TextEmbedding::try_new_from_user_defined(user_def_model, Default::default()) {
-        Err(err) => {
-            error!("{ERR_PREFIX} Couldn't load model bge_small_en_v15: {err}");
-        }
-        Ok(result) => result,
-    };
-
-    // generate embeddings with the default batch size, 256
     let embeddings = match model.embed(input, None) {
         Err(err) => {
             error!("{ERR_PREFIX} Unable to generate bge_small_en_v15 embeddings: {err}",);
@@ -76,8 +80,15 @@ fn embedding_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
         Ok(result) => result,
     };
 
-    embeddings.clone()
+    embeddings
 }
+
+// this downloads the model on-the-fly
+// let model = match TextEmbedding::try_new(InitOptions {
+//     model_name: EmbeddingModel::BGESmallENV15,
+//     show_download_progress: false,
+//     ..Default::default()
+// }) {
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
