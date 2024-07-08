@@ -8,12 +8,7 @@ extension_sql_file!("lib.sql");
 
 const ERR_PREFIX: &'static str = "[NEON_AI]";
 
-#[pg_extern]
-fn hello_neon_ai() -> &'static str {
-    "Hello, neon_ai"
-}
-
-#[pg_extern]
+#[pg_extern(immutable, strict)]
 fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
     let auth = format!("Bearer {key}");
     let json_body = ureq::json!({ "model": model, "input": input });
@@ -34,7 +29,7 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
     }
 }
 
-#[pg_extern]
+#[pg_extern(immutable, strict)]
 fn embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
     thread_local! {
         static MODEL_CELL: OnceCell<TextEmbedding> = const { OnceCell::new() };
@@ -66,42 +61,53 @@ fn embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
     })
 }
 
-// #[pg_extern]
-// fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
-//     thread_local! {
-//         static MODEL_CELL: OnceCell<TextEmbedding> = const { OnceCell::new() };
-//     }
-//     MODEL_CELL.with(|cell| {
-//         let model = cell.get_or_init(|| {
-//             let user_def_model = UserDefinedEmbeddingModel {
-//                 onnx_file: include_bytes!("../bge_small_en_v15/model.onnx").to_vec(),
-//                 tokenizer_files: TokenizerFiles {
-//                     tokenizer_file: include_bytes!("../bge_small_en_v15/tokenizer.json").to_vec(),
-//                     config_file: include_bytes!("../bge_small_en_v15/config.json").to_vec(),
-//                     special_tokens_map_file: include_bytes!("../bge_small_en_v15/special_tokens_map.json").to_vec(),
-//                     tokenizer_config_file: include_bytes!("../bge_small_en_v15/tokenizer_config.json").to_vec(),
-//                 },
-//             };
-//             match TextEmbedding::try_new_from_user_defined(user_def_model, Default::default()) {
-//                 Err(err) => error!("{ERR_PREFIX} Couldn't load model bge_small_en_v15: {err}"),
-//                 Ok(result) => result,
-//             }
-//         });
-//         match model.embed(input, None) {
-//             Err(err) => error!("{ERR_PREFIX} Unable to generate bge_small_en_v15 embeddings: {err}"),
-//             Ok(vectors) => vectors,
-//         }
-//     })
-// }
-
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
 mod tests {
+    use std::env;
+    use serde_json;
     use pgrx::prelude::*;
 
+    #[pg_test(error = "[NEON_AI] HTTP status code 401 trying to reach OpenAI API")]
+    fn test_embedding_openai_raw_bad_key() {
+        crate::embedding_openai_raw("text-embedding-3-small", "hello world!", "invalid-key");
+    }
+
+    #[pg_test(error = "[NEON_AI] HTTP status code 404 trying to reach OpenAI API")]
+    fn test_embedding_openai_raw_bad_model() {
+        let api_key = match env::var("OPENAI_API_KEY") {
+            Err(err) => error!("Environment variable OPENAI_API_KEY is required for this test: {}", err),
+            Ok(key) => key
+        };
+        crate::embedding_openai_raw("text-embedding-3-immense", "hello world!", &api_key);
+    }
+
     #[pg_test]
-    fn test_hello_neon_ai() {
-        assert_eq!("Hello, neon_ai", crate::hello_neon_ai());
+    fn test_embedding_openai_raw_small() {
+        let api_key = match env::var("OPENAI_API_KEY") {
+            Err(err) => error!("Environment variable OPENAI_API_KEY is required for this test: {}", err),
+            Ok(key) => key
+        };
+        let result = match crate::embedding_openai_raw("text-embedding-3-small", "hello world!", &api_key).0 {
+            serde_json::Value::Object(obj) => obj,
+            _ => error!("Unexpected non-Object JSON type")
+        };
+        assert!(result.contains_key("data"));
+    }
+
+    #[pg_test]
+    fn test_embedding_bge_small_en_v15_length() {
+        assert!(crate::embedding_bge_small_en_v15("hello world!").len() == 384);
+    }
+
+    #[pg_test]
+    fn test_embedding_bge_small_en_v15_immutability() {
+        assert!(crate::embedding_bge_small_en_v15("hello world!") == crate::embedding_bge_small_en_v15("hello world!"));
+    }
+
+    #[pg_test]
+    fn test_embedding_bge_small_en_v15_variability() {
+        assert!(crate::embedding_bge_small_en_v15("hello world!") != crate::embedding_bge_small_en_v15("goodbye moon!"));
     }
 }
 
