@@ -35,7 +35,7 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
 }
 
 #[pg_extern]
-fn embedding_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
+fn embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
     thread_local! {
         static MODEL_CELL: OnceCell<TextEmbedding> = const { OnceCell::new() };
     }
@@ -50,19 +50,49 @@ fn embedding_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
                     tokenizer_config_file: include_bytes!("../bge_small_en_v15/tokenizer_config.json").to_vec(),
                 },
             };
-
             match TextEmbedding::try_new_from_user_defined(user_def_model, Default::default()) {
                 Err(err) => error!("{ERR_PREFIX} Couldn't load model bge_small_en_v15: {err}"),
                 Ok(result) => result,
             }
         });
-
-        match model.embed(input, None) {
+        let vectors = match model.embed(vec![input], None) {
             Err(err) => error!("{ERR_PREFIX} Unable to generate bge_small_en_v15 embeddings: {err}"),
-            Ok(result) => result,
+            Ok(vectors) => vectors,
+        };
+        match vectors.into_iter().next() {
+            None => error!("{ERR_PREFIX} Unexpected empty result vector"),
+            Some(vector) => vector,    
         }
     })
 }
+
+// #[pg_extern]
+// fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
+//     thread_local! {
+//         static MODEL_CELL: OnceCell<TextEmbedding> = const { OnceCell::new() };
+//     }
+//     MODEL_CELL.with(|cell| {
+//         let model = cell.get_or_init(|| {
+//             let user_def_model = UserDefinedEmbeddingModel {
+//                 onnx_file: include_bytes!("../bge_small_en_v15/model.onnx").to_vec(),
+//                 tokenizer_files: TokenizerFiles {
+//                     tokenizer_file: include_bytes!("../bge_small_en_v15/tokenizer.json").to_vec(),
+//                     config_file: include_bytes!("../bge_small_en_v15/config.json").to_vec(),
+//                     special_tokens_map_file: include_bytes!("../bge_small_en_v15/special_tokens_map.json").to_vec(),
+//                     tokenizer_config_file: include_bytes!("../bge_small_en_v15/tokenizer_config.json").to_vec(),
+//                 },
+//             };
+//             match TextEmbedding::try_new_from_user_defined(user_def_model, Default::default()) {
+//                 Err(err) => error!("{ERR_PREFIX} Couldn't load model bge_small_en_v15: {err}"),
+//                 Ok(result) => result,
+//             }
+//         });
+//         match model.embed(input, None) {
+//             Err(err) => error!("{ERR_PREFIX} Unable to generate bge_small_en_v15 embeddings: {err}"),
+//             Ok(vectors) => vectors,
+//         }
+//     })
+// }
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
