@@ -1,6 +1,7 @@
 use fastembed::{TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
 use pgrx::prelude::*;
 use std::cell::OnceCell;
+use serde_json_path::JsonPath;
 
 pgrx::pg_module_magic!();
 
@@ -9,11 +10,11 @@ extension_sql_file!("lib.sql");
 const ERR_PREFIX: &'static str = "[NEON_AI]";
 
 #[pg_extern(immutable, strict)]
-fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
+fn embedding_openai_raw(model: &str, input: &str, key: &str) -> Vec<f32> {
     let auth = format!("Bearer {key}");
     let json_body = ureq::json!({ "model": model, "input": input });
 
-    match ureq::post("https://api.openai.com/v1/embeddings")
+    let response = match ureq::post("https://api.openai.com/v1/embeddings")
         .set("Authorization", auth.as_str())
         .send_json(json_body)
     {
@@ -21,16 +22,23 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
             let msg = err.message().unwrap_or("no further details");
             error!("{ERR_PREFIX} Transport error communicating with OpenAI API: {msg}");
         }
-        Err(ureq::Error::Status(code, _)) => error!("{ERR_PREFIX} HTTP status code {code} trying to reach OpenAI API"),
-        Ok(response) => match response.into_json() {
-            Err(err) => error!("{ERR_PREFIX} Failed to parse JSON received from OpenAI API: {err}"),
-            Ok(value) => pgrx::JsonB(value),
-        },
-    }
+        Err(ureq::Error::Status(code, _)) => {
+            error!("{ERR_PREFIX} HTTP status code {code} trying to reach OpenAI API")
+        }
+        Ok(response) => response
+    };
+    let json: serde_json::Value = match response.into_json() {
+        Err(err) => error!("{ERR_PREFIX} Failed to parse JSON received from OpenAI API: {err}"),
+        Ok(value) => value,
+    };
+    let path = JsonPath::parse("$.data.embedding").unwrap();  // this won't error
+    let value = path.query(&json).exactly_one().unwrap_or_else(|_| error!("{ERR_PREFIX} No $.data.embedding in OpenAI data"));
+    let arr = value.as_array().unwrap_or_else(|| error!("{ERR_PREFIX} $.data.embedding in OpenAI data is not an array"));
+    arr.to_vec()
 }
 
-// NOTE. It might be nice to expose this function too as an overload, but as at 2024-07-08 
-// pgrx doesn't support Vec<Vec<_>>: https://github.com/pgcentralfoundation/pgrx/issues/1762.
+// NOTE. It might be nice to expose this function directly, but as at 2024-07-08 pgrx
+// doesn't support Vec<Vec<_>>: https://github.com/pgcentralfoundation/pgrx/issues/1762.
 // #[pg_extern(immutable, strict, name = "embedding_bge_small_en_v15")]
 fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
     thread_local! {
