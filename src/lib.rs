@@ -29,12 +29,9 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
     }
 }
 
-#[pg_extern]
-fn test_nested() -> Vec<Vec<f32>> {
-    vec![vec![1.1, 1.2, 1.3], vec![2.1, 2.2, 2.3]]
-}
-
-#[pg_extern(immutable, strict, name = "embedding_bge_small_en_v15")]
+// NOTE. It might be nice to expose this function too as an overload, but as at 2024-07-08 
+// pgrx doesn't support Vec<Vec<_>>: https://github.com/pgcentralfoundation/pgrx/issues/1762.
+// #[pg_extern(immutable, strict, name = "embedding_bge_small_en_v15")]
 fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
     thread_local! {
         static MODEL_CELL: OnceCell<TextEmbedding> = const { OnceCell::new() };
@@ -62,7 +59,7 @@ fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
     })
 }
 
-#[pg_extern(immutable, strict, name = "embedding_bge_small_en_v15")]
+#[pg_extern(immutable, strict)]
 fn embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
     let vectors = embeddings_bge_small_en_v15(vec![input]);
     match vectors.into_iter().next() {
