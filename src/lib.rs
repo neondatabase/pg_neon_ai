@@ -1,7 +1,6 @@
 use fastembed::{TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
 use pgrx::prelude::*;
 use std::cell::OnceCell;
-use serde_json_path::JsonPath;
 
 pgrx::pg_module_magic!();
 
@@ -10,7 +9,7 @@ extension_sql_file!("lib.sql");
 const ERR_PREFIX: &'static str = "[NEON_AI]";
 
 #[pg_extern(immutable, strict)]
-fn embedding_openai_raw(model: &str, input: &str, key: &str) -> Vec<f32> {
+fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
     let auth = format!("Bearer {key}");
     let json_body = ureq::json!({ "model": model, "input": input });
 
@@ -25,16 +24,12 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> Vec<f32> {
         Err(ureq::Error::Status(code, _)) => {
             error!("{ERR_PREFIX} HTTP status code {code} trying to reach OpenAI API")
         }
-        Ok(response) => response
+        Ok(response) => response,
     };
-    let json: serde_json::Value = match response.into_json() {
+    match response.into_json() {
         Err(err) => error!("{ERR_PREFIX} Failed to parse JSON received from OpenAI API: {err}"),
-        Ok(value) => value,
-    };
-    let path = JsonPath::parse("$.data.embedding").unwrap();  // this won't error
-    let value = path.query(&json).exactly_one().unwrap_or_else(|_| error!("{ERR_PREFIX} No $.data.embedding in OpenAI data"));
-    let arr = value.as_array().unwrap_or_else(|| error!("{ERR_PREFIX} $.data.embedding in OpenAI data is not an array"));
-    arr.to_vec()
+        Ok(value) => pgrx::JsonB(value)
+    }
 }
 
 // NOTE. It might be nice to expose this function directly, but as at 2024-07-08 pgrx
@@ -57,12 +52,12 @@ fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
             };
             match TextEmbedding::try_new_from_user_defined(user_def_model, Default::default()) {
                 Err(err) => error!("{ERR_PREFIX} Couldn't load model bge_small_en_v15: {err}"),
-                Ok(result) => result,
+                Ok(result) => result
             }
         });
         match model.embed(input, None) {
             Err(err) => error!("{ERR_PREFIX} Unable to generate bge_small_en_v15 embeddings: {err}"),
-            Ok(vectors) => vectors,
+            Ok(vectors) => vectors
         }
     })
 }
@@ -72,7 +67,7 @@ fn embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
     let vectors = embeddings_bge_small_en_v15(vec![input]);
     match vectors.into_iter().next() {
         None => error!("{ERR_PREFIX} Unexpected empty result vector"),
-        Some(vector) => vector,
+        Some(vector) => vector
     }
 }
 
@@ -86,7 +81,7 @@ mod tests {
     fn get_openai_api_key() -> String {
         match env::var("OPENAI_API_KEY") {
             Err(err) => error!("Tests require environment variable OPENAI_API_KEY: {}", err),
-            Ok(key) => key,
+            Ok(key) => key
         }
     }
 
