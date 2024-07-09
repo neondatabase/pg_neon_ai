@@ -24,7 +24,7 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
         Err(ureq::Error::Status(code, _)) => {
             error!("{ERR_PREFIX} HTTP status code {code} trying to reach OpenAI API")
         }
-        Ok(response) => response,
+        Ok(response) => response
     };
     match response.into_json() {
         Err(err) => error!("{ERR_PREFIX} Failed to parse JSON received from OpenAI API: {err}"),
@@ -37,9 +37,9 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
 // #[pg_extern(immutable, strict, name = "embedding_bge_small_en_v15")]
 fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
     thread_local! {
-        static MODEL_CELL: OnceCell<TextEmbedding> = const { OnceCell::new() };
+        static CELL: OnceCell<TextEmbedding> = const { OnceCell::new() };
     }
-    MODEL_CELL.with(|cell| {
+    CELL.with(|cell| {
         let model = cell.get_or_init(|| {
             let user_def_model = UserDefinedEmbeddingModel {
                 onnx_file: include_bytes!("../bge_small_en_v15/model.onnx").to_vec(),
@@ -100,7 +100,7 @@ mod tests {
         let json = crate::embedding_openai_raw("text-embedding-3-small", "hello world!", &get_openai_api_key());
         let result = match json.0 {
             serde_json::Value::Object(obj) => obj,
-            _ => error!("Unexpected non-Object JSON type"),
+            _ => error!("Unexpected non-Object JSON type")
         };
         assert!(result.contains_key("data"));
     }
