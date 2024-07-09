@@ -17,3 +17,5 @@ export PG_CONFIG=~/.pgrx/13.15/pgrx-install/bin/pg_config
 make
 make install
 ```
+
+fastembed-rs cache is at: `~/.pgrx/data-13/.fastembed_cache/`

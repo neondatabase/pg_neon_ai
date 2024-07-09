@@ -1,12 +1,25 @@
-use fastembed::{TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel};
+use fastembed::{TextEmbedding, TextRerank, TokenizerFiles, UserDefinedModel};
 use pgrx::prelude::*;
 use std::cell::OnceCell;
 
 pgrx::pg_module_magic!();
-
 extension_sql_file!("lib.sql");
-
 const ERR_PREFIX: &'static str = "[NEON_AI]";
+
+// NOTE. This assumes /unix/style/paths.
+macro_rules! local_model {
+    ($folder:literal) => {
+        UserDefinedModel {
+            onnx_file: include_bytes!(concat!($folder, "/model.onnx")).to_vec(),
+            tokenizer_files: TokenizerFiles {
+                tokenizer_file: include_bytes!(concat!($folder, "/tokenizer.json")).to_vec(),
+                config_file: include_bytes!(concat!($folder, "/config.json")).to_vec(),
+                special_tokens_map_file: include_bytes!(concat!($folder, "/special_tokens_map.json")).to_vec(),
+                tokenizer_config_file: include_bytes!(concat!($folder, "/tokenizer_config.json")).to_vec(),
+            },
+        }
+    };
+}
 
 #[pg_extern(immutable, strict)]
 fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
@@ -24,11 +37,11 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
         Err(ureq::Error::Status(code, _)) => {
             error!("{ERR_PREFIX} HTTP status code {code} trying to reach OpenAI API")
         }
-        Ok(response) => response
+        Ok(response) => response,
     };
     match response.into_json() {
         Err(err) => error!("{ERR_PREFIX} Failed to parse JSON received from OpenAI API: {err}"),
-        Ok(value) => pgrx::JsonB(value)
+        Ok(value) => pgrx::JsonB(value),
     }
 }
 
@@ -41,23 +54,15 @@ fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
     }
     CELL.with(|cell| {
         let model = cell.get_or_init(|| {
-            let user_def_model = UserDefinedEmbeddingModel {
-                onnx_file: include_bytes!("../bge_small_en_v15/model.onnx").to_vec(),
-                tokenizer_files: TokenizerFiles {
-                    tokenizer_file: include_bytes!("../bge_small_en_v15/tokenizer.json").to_vec(),
-                    config_file: include_bytes!("../bge_small_en_v15/config.json").to_vec(),
-                    special_tokens_map_file: include_bytes!("../bge_small_en_v15/special_tokens_map.json").to_vec(),
-                    tokenizer_config_file: include_bytes!("../bge_small_en_v15/tokenizer_config.json").to_vec(),
-                },
-            };
+            let user_def_model = local_model!("../bge_small_en_v15");
             match TextEmbedding::try_new_from_user_defined(user_def_model, Default::default()) {
                 Err(err) => error!("{ERR_PREFIX} Couldn't load model bge_small_en_v15: {err}"),
-                Ok(result) => result
+                Ok(result) => result,
             }
         });
         match model.embed(input, None) {
             Err(err) => error!("{ERR_PREFIX} Unable to generate bge_small_en_v15 embeddings: {err}"),
-            Ok(vectors) => vectors
+            Ok(vectors) => vectors,
         }
     })
 }
@@ -67,8 +72,29 @@ fn embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
     let vectors = embeddings_bge_small_en_v15(vec![input]);
     match vectors.into_iter().next() {
         None => error!("{ERR_PREFIX} Unexpected empty result vector"),
-        Some(vector) => vector
+        Some(vector) => vector,
     }
+}
+
+#[pg_extern(immutable, strict)]
+fn rerank_jina_v1_turbo_en(needle: &str, haystack: Vec<&str>) -> Vec<i32> {
+    thread_local! {
+        static CELL: OnceCell<TextRerank> = const { OnceCell::new() };
+    }
+    CELL.with(|cell| {
+        let model = cell.get_or_init(|| {
+            let user_def_model = local_model!("../jina_reranker_v1_turbo_en");
+            match TextRerank::try_new_from_user_defined(user_def_model, Default::default()) {
+                Err(err) => error!("{ERR_PREFIX} Couldn't load model jina_reranker_v1_turbo_en: {err}"),
+                Ok(result) => result,
+            }
+        });
+        let reranking = match model.rerank(needle, haystack, false, None) {
+            Err(err) => error!("{ERR_PREFIX} Unable to rerank with jina_reranker_v1_turbo_en: {err}"),
+            Ok(rr) => rr,
+        };
+        reranking.iter().map(|rr| rr.index as i32).collect()
+    })
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -81,7 +107,7 @@ mod tests {
     fn get_openai_api_key() -> String {
         match env::var("OPENAI_API_KEY") {
             Err(err) => error!("Tests require environment variable OPENAI_API_KEY: {}", err),
-            Ok(key) => key
+            Ok(key) => key,
         }
     }
 
@@ -100,7 +126,7 @@ mod tests {
         let json = crate::embedding_openai_raw("text-embedding-3-small", "hello world!", &get_openai_api_key());
         let result = match json.0 {
             serde_json::Value::Object(obj) => obj,
-            _ => error!("Unexpected non-Object JSON type")
+            _ => error!("Unexpected non-Object JSON type"),
         };
         assert!(result.contains_key("data"));
     }
@@ -118,6 +144,13 @@ mod tests {
     #[pg_test]
     fn test_embedding_bge_small_en_v15_variability() {
         assert!(crate::embedding_bge_small_en_v15("hello world!") != crate::embedding_bge_small_en_v15("bye moon!"));
+    }
+
+    #[pg_test]
+    fn test_rerank_jina_v1_turbo_en() {
+        let candidate_pets = vec!["hamster", "crocodile", "floorboard", "cat", "warhead"];
+        let ranking = crate::rerank_jina_v1_turbo_en("pet", candidate_pets);
+        assert!(ranking == vec![3, 0, 1, 2, 4]); // i.e. cat, hamster, crocodile, floorboard, warhead
     }
 }
 
