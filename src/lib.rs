@@ -77,13 +77,13 @@ fn embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
 }
 
 #[pg_extern(immutable, strict, name = "rerank_jina_v1_turbo_en")]
-fn reranks_jina_v1_turbo_en(query: &str, documents: Vec<&str>) -> Vec<f32> {
+fn reranks_jina_v1_tiny_en(query: &str, documents: Vec<&str>) -> Vec<f32> {
     thread_local! {
         static CELL: OnceCell<TextRerank> = const { OnceCell::new() };
     }
     CELL.with(|cell| {
         let model = cell.get_or_init(|| {
-            let user_def_model = local_model!("../jina_reranker_v1_turbo_en");
+            let user_def_model = local_model!("../jina_reranker_v1_tiny_en");
             match TextRerank::try_new_from_user_defined(user_def_model, Default::default()) {
                 Err(err) => error!("{ERR_PREFIX} Couldn't load model jina_reranker_v1_turbo_en: {err}"),
                 Ok(result) => result,
@@ -99,8 +99,8 @@ fn reranks_jina_v1_turbo_en(query: &str, documents: Vec<&str>) -> Vec<f32> {
 }
 
 #[pg_extern(immutable, strict)]
-fn rerank_jina_v1_turbo_en(query: &str, document: &str) -> f32 {
-    let scores = reranks_jina_v1_turbo_en(query, vec![document]);
+fn rerank_jina_v1_tiny_en(query: &str, document: &str) -> f32 {
+    let scores = reranks_jina_v1_tiny_en(query, vec![document]);
     match scores.first() {
         None => error!("{ERR_PREFIX} Unexpectedly empty reranking vector"),
         Some(score) => *score
@@ -158,16 +158,17 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_rerank_jina_v1_turbo_en() {
-        let candidate_pets = vec!["crocodile", "hamster", "floorboard", "cat", "warhead"];
-        let scores = crate::reranks_jina_v1_turbo_en("pet", candidate_pets.clone());
+    fn test_rerank_jina_v1_tiny_en() {
+        let candidate_pets = vec!["crocodile", "hamster", "indeterminate", "floorboard", "cat"];
+        let scores = crate::reranks_jina_v1_tiny_en("pet", candidate_pets.clone());
         let mut sorted_pets = candidate_pets.clone();
         sorted_pets.sort_by(|pet1, pet2| {
             let index1 = candidate_pets.iter().position(|pet| pet == pet1).unwrap();
             let index2 = candidate_pets.iter().position(|pet| pet == pet2).unwrap();
             scores[index1].partial_cmp(&scores[index2]).unwrap().reverse()
         });
-        assert!(sorted_pets == vec!["cat", "hamster", "crocodile", "floorboard", "warhead"]);
+        log!("{:?}", sorted_pets);
+        assert!(sorted_pets == vec!["cat", "hamster", "crocodile", "floorboard", "indeterminate"]);
     }
 }
 
