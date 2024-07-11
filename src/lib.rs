@@ -1,4 +1,4 @@
-use fastembed::{TextEmbedding, TextRerank, TokenizerFiles, UserDefinedModel};
+use fastembed::{RerankResult, TextEmbedding, TextRerank, TokenizerFiles, UserDefinedModel};
 use pgrx::prelude::*;
 use std::cell::OnceCell;
 
@@ -20,6 +20,8 @@ macro_rules! local_model {
         }
     };
 }
+
+// === OpenAI embeddings ===
 
 #[pg_extern(immutable, strict)]
 fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
@@ -44,6 +46,8 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
         Ok(value) => pgrx::JsonB(value),
     }
 }
+
+// === Local embeddings ===
 
 // NOTE. It might be nice to expose this function directly, but as at 2024-07-08 pgrx
 // doesn't support Vec<Vec<_>>: https://github.com/pgcentralfoundation/pgrx/issues/1762.
@@ -76,8 +80,9 @@ fn embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
     }
 }
 
-#[pg_extern(immutable, strict, name = "rerank_jina_v1_turbo_en")]
-fn reranks_jina_v1_tiny_en(query: &str, documents: Vec<&str>) -> Vec<f32> {
+// === Local reranking ===
+
+fn reranks_jina_v1_tiny_en_base(query: &str, documents: Vec<&str>) -> Vec<RerankResult> {
     thread_local! {
         static CELL: OnceCell<TextRerank> = const { OnceCell::new() };
     }
@@ -89,24 +94,36 @@ fn reranks_jina_v1_tiny_en(query: &str, documents: Vec<&str>) -> Vec<f32> {
                 Ok(result) => result,
             }
         });
-        let mut reranking = match model.rerank(query, documents, false, None) {
+        match model.rerank(query, documents, false, None) {
             Err(err) => error!("{ERR_PREFIX} Unable to rerank with jina_reranker_v1_turbo_en: {err}"),
             Ok(rr) => rr,
-        };
-        reranking.sort_by(|rr1, rr2| rr1.index.cmp(&rr2.index));  // return to input order
-        reranking.iter().map(|rr| rr.score as f32).collect()
+        }
     })
 }
 
 #[pg_extern(immutable, strict)]
-fn rerank_jina_v1_tiny_en(query: &str, document: &str) -> f32 {
-    let scores = reranks_jina_v1_tiny_en(query, vec![document]);
+fn rerank_indices_jina_v1_tiny_en(query: &str, documents: Vec<&str>) -> Vec<i32> {
+    let reranking = reranks_jina_v1_tiny_en_base(query, documents);
+    reranking.iter().map(|rr| rr.index as i32).collect()
+}
+
+#[pg_extern(immutable, strict)]
+fn rerank_scores_jina_v1_tiny_en(query: &str, documents: Vec<&str>) -> Vec<f32> {
+    let mut reranking = reranks_jina_v1_tiny_en_base(query, documents);
+    reranking.sort_by(|rr1, rr2| rr1.index.cmp(&rr2.index)); // return to input order
+    reranking.iter().map(|rr| rr.score as f32).collect()
+}
+
+#[pg_extern(immutable, strict)]
+fn rerank_score_jina_v1_tiny_en(query: &str, document: &str) -> f32 {
+    let scores = rerank_scores_jina_v1_tiny_en(query, vec![document]);
     match scores.first() {
         None => error!("{ERR_PREFIX} Unexpectedly empty reranking vector"),
-        Some(score) => *score
+        Some(score) => *score,
     }
 }
 
+// === Tests ===
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pg_schema]
@@ -160,7 +177,7 @@ mod tests {
     #[pg_test]
     fn test_rerank_jina_v1_tiny_en() {
         let candidate_pets = vec!["crocodile", "hamster", "indeterminate", "floorboard", "cat"];
-        let scores = crate::reranks_jina_v1_tiny_en("pet", candidate_pets.clone());
+        let scores = crate::rerank_scores_jina_v1_tiny_en("pet", candidate_pets.clone());
         let mut sorted_pets = candidate_pets.clone();
         sorted_pets.sort_by(|pet1, pet2| {
             let index1 = candidate_pets.iter().position(|pet| pet == pet1).unwrap();
