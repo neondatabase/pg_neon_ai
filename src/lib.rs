@@ -1,4 +1,6 @@
-use fastembed::{RerankResult, TextEmbedding, TextRerank, TokenizerFiles, UserDefinedModel};
+use fastembed::{
+    RerankResult, TextEmbedding, TextRerank, TokenizerFiles, UserDefinedEmbeddingModel, UserDefinedRerankingModel,
+};
 use pgrx::prelude::*;
 use std::cell::OnceCell;
 
@@ -8,8 +10,8 @@ const ERR_PREFIX: &'static str = "[NEON_AI]";
 
 // NOTE. This assumes /unix/style/paths.
 macro_rules! local_model {
-    ($folder:literal) => {
-        UserDefinedModel {
+    ($model:ident, $folder:literal) => {
+        $model {
             onnx_file: include_bytes!(concat!($folder, "/model.onnx")).to_vec(),
             tokenizer_files: TokenizerFiles {
                 tokenizer_file: include_bytes!(concat!($folder, "/tokenizer.json")).to_vec(),
@@ -58,7 +60,7 @@ fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
     }
     CELL.with(|cell| {
         let model = cell.get_or_init(|| {
-            let user_def_model = local_model!("../bge_small_en_v15");
+            let user_def_model = local_model!(UserDefinedEmbeddingModel, "../bge_small_en_v15");
             match TextEmbedding::try_new_from_user_defined(user_def_model, Default::default()) {
                 Err(err) => error!("{ERR_PREFIX} Couldn't load model bge_small_en_v15: {err}"),
                 Ok(result) => result,
@@ -88,7 +90,7 @@ fn reranks_jina_v1_tiny_en_base(query: &str, documents: Vec<&str>) -> Vec<Rerank
     }
     CELL.with(|cell| {
         let model = cell.get_or_init(|| {
-            let user_def_model = local_model!("../jina_reranker_v1_tiny_en");
+            let user_def_model = local_model!(UserDefinedRerankingModel, "../jina_reranker_v1_tiny_en");
             match TextRerank::try_new_from_user_defined(user_def_model, Default::default()) {
                 Err(err) => error!("{ERR_PREFIX} Couldn't load model jina_reranker_v1_turbo_en: {err}"),
                 Ok(result) => result,
