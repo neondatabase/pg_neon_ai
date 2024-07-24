@@ -3,22 +3,30 @@ use fastembed::{
 };
 use pgrx::prelude::*;
 use std::cell::OnceCell;
+use text_splitter::{ChunkConfig, TextSplitter};
+use tokenizers::{AddedToken, Tokenizer};
 
 pgrx::pg_module_magic!();
 extension_sql_file!("lib.sql");
 const ERR_PREFIX: &'static str = "[NEON_AI]";
 
-// NOTE. This assumes /unix/style/paths.
+// NOTE: these macros assume /unix/style/paths
+macro_rules! local_tokenizer_files {
+    ($folder:literal) => {
+        TokenizerFiles {
+            tokenizer_file: include_bytes!(concat!($folder, "/tokenizer.json")).to_vec(),
+            config_file: include_bytes!(concat!($folder, "/config.json")).to_vec(),
+            special_tokens_map_file: include_bytes!(concat!($folder, "/special_tokens_map.json")).to_vec(),
+            tokenizer_config_file: include_bytes!(concat!($folder, "/tokenizer_config.json")).to_vec(),
+        }
+    };
+}
+
 macro_rules! local_model {
     ($model:ident, $folder:literal) => {
         $model {
             onnx_file: include_bytes!(concat!($folder, "/model.onnx")).to_vec(),
-            tokenizer_files: TokenizerFiles {
-                tokenizer_file: include_bytes!(concat!($folder, "/tokenizer.json")).to_vec(),
-                config_file: include_bytes!(concat!($folder, "/config.json")).to_vec(),
-                special_tokens_map_file: include_bytes!(concat!($folder, "/special_tokens_map.json")).to_vec(),
-                tokenizer_config_file: include_bytes!(concat!($folder, "/tokenizer_config.json")).to_vec(),
-            },
+            tokenizer_files: local_tokenizer_files!($folder),
         }
     };
 }
@@ -125,6 +133,82 @@ fn rerank_score_jina_v1_tiny_en(query: &str, document: &str) -> f32 {
     }
 }
 
+#[pg_extern(immutable, strict)]
+fn chunks_by_characters(document: &str, max_characters: i32, max_overlap: i32) -> Vec<&str> {
+    if max_characters < 1 || max_overlap < 0 {
+        error!("{ERR_PREFIX} max_characters must be >= 1 and max_overlap must be >= 0");
+    }
+    let config = match ChunkConfig::new(max_characters as usize).with_overlap(max_overlap as usize) {
+        Err(err) => error!("{ERR_PREFIX} Error creating chunk config: {err}"),
+        Ok(config) => config,
+    };
+    let splitter = TextSplitter::new(config);
+    let chunks = splitter.chunks(document).collect();
+    chunks
+}
+
+#[pg_extern(immutable, strict)]
+fn chunks_by_tokens(document: &str, max_tokens: i32, max_overlap: i32) -> Vec<&str> {
+    thread_local! {
+        static CELL: OnceCell<(Tokenizer, i32)> = const { OnceCell::new() };
+    }
+    CELL.with(|cell| {
+        let (tokenizer, model_max_length) = cell.get_or_init(|| {
+            let mut tokenizer = match Tokenizer::from_bytes(include_bytes!("../bge_small_en_v15/tokenizer.json")) {
+                Err(err) => error!("{ERR_PREFIX} Error loading tokenizer: {err}"),
+                Ok(tokenizer) => tokenizer,
+            };
+            let special_tokens_map: serde_json::Value =
+                match serde_json::from_slice(include_bytes!("../bge_small_en_v15/special_tokens_map.json")) {
+                    Err(err) => error!("{ERR_PREFIX} Error loading special tokens: {err}"),
+                    Ok(map) => map,
+                };
+            if let serde_json::Value::Object(root_object) = special_tokens_map {
+                for (_, value) in root_object.iter() {
+                    if value.is_string() {
+                        tokenizer.add_special_tokens(&[AddedToken {
+                            content: value.as_str().unwrap().into(),
+                            special: true,
+                            ..Default::default()
+                        }]);
+                    } else if value.is_object() {
+                        tokenizer.add_special_tokens(&[AddedToken {
+                            content: value["content"].as_str().unwrap().into(),
+                            special: true,
+                            single_word: value["single_word"].as_bool().unwrap(),
+                            lstrip: value["lstrip"].as_bool().unwrap(),
+                            rstrip: value["rstrip"].as_bool().unwrap(),
+                            normalized: value["normalized"].as_bool().unwrap(),
+                        }]);
+                    }
+                }
+            }
+            let tokenizer_config: serde_json::Value = match serde_json::from_slice(include_bytes!("../bge_small_en_v15/tokenizer_config.json")) {
+                Err(err) => error!("{ERR_PREFIX} Error loading tokenizer config: {err}"),
+                Ok(config) => config,
+            };
+            let model_max_length = match tokenizer_config["model_max_length"].as_f64() {
+                None => error!("{ERR_PREFIX} Invalid max model length in tokenizer config"),
+                Some(len) => len,
+            };
+
+            (tokenizer, model_max_length as i32)
+        });
+
+        if !(max_tokens > 0 && max_tokens <= *model_max_length && max_overlap >= 0 && max_overlap < *model_max_length) {
+            error!("{ERR_PREFIX} max_tokens must be between 1 and {model_max_length}, and max_overlap must be between 0 and {}", model_max_length - 1);
+        }
+
+        let size_config = match ChunkConfig::new(max_tokens as usize).with_overlap(max_overlap as usize) {
+            Err(err) => error!("{ERR_PREFIX} Error creating chunk config: {err}"),
+            Ok(config) => config,
+        };
+        let splitter = TextSplitter::new(size_config.with_sizer(tokenizer));
+        let chunks = splitter.chunks(document).collect();
+        chunks
+    })
+}
+
 // === Tests ===
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -188,6 +272,38 @@ mod tests {
         });
         log!("{:?}", sorted_pets);
         assert!(sorted_pets == vec!["cat", "hamster", "crocodile", "floorboard", "indeterminate"]);
+    }
+
+    #[pg_test]
+    fn test_chunk_by_characters() {
+        assert!(
+            crate::chunks_by_characters(
+                "The quick brown fox jumps over the lazy dog. In other news, the dish ran away with the spoon.",
+                30,
+                10
+            ) == vec![
+                "The quick brown fox jumps over",
+                "jumps over the lazy dog.",
+                "In other news, the dish ran",
+                "dish ran away with the spoon."
+            ]
+        );
+    }
+
+    #[pg_test]
+    fn test_chunk_by_tokens() {
+        assert!(
+            crate::chunks_by_tokens(
+                "The quick brown fox jumps over the lazy dog. In other news, the dish ran away with the spoon.",
+                8,
+                2
+            ) == vec![
+                "The quick brown fox jumps over the lazy",
+                "the lazy dog.",
+                "In other news, the dish ran away",
+                "ran away with the spoon."
+            ]
+        );
     }
 }
 
