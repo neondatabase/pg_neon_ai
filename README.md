@@ -6,8 +6,11 @@ Currently supports:
 
 * Querying OpenAI API for embeddings
 
-* Generating embeddings *within Postgres* using https://huggingface.co/Xenova/bge-small-en-v1.5/blob/main/onnx/model.onnx
+* Chunking *within Postgres* for https://huggingface.co/Xenova/bge-small-en-v1.5
 
+* Generating embeddings *within Postgres* using https://huggingface.co/Xenova/bge-small-en-v1.5
+
+* Reranking *within Postgres* using https://huggingface.co/jinaai/jina-reranker-v1-tiny-en
 
 ## Compiling pgvector for PGRX Postgres
 
