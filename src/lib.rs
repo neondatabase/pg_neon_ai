@@ -5,7 +5,6 @@ use pgrx::prelude::*;
 use std::cell::OnceCell;
 use text_splitter::{ChunkConfig, TextSplitter};
 use tokenizers::{AddedToken, Tokenizer};
-use lopdf::Document;
 
 pgrx::pg_module_magic!();
 extension_sql_file!("lib.sql");
@@ -215,19 +214,23 @@ fn chunks_by_tokens(document: &str, max_tokens: i32, max_overlap: i32) -> Vec<&s
 // === Local PDF text extraction
 
 #[pg_extern(immutable, strict)]
-fn extract_pdf_text(document: &[u8]) -> Vec<String> {
-    let pdf = Document::load_mem(document);
-    let doc = match pdf {
-        Err(err) => error!("{ERR_PREFIX} Error loading PDF: {err}"),
-        Ok(doc) => doc,
-    };
-    doc.page_iter().enumerate().map(|(i, _)| { 
-        let page_no = i + 1;
-        match doc.extract_text(&[page_no as u32]) {
-          Err(err) => error!("{ERR_PREFIX} Error extracting text from PDF on page {page_no}: {err}"),
-          Ok(text) => text
-        }
-    }).collect()
+fn extract_pdf_text(document: &[u8]) -> String {
+    // let pdf = Document::load_mem(document);
+    // let doc = match pdf {
+    //     Err(err) => error!("{ERR_PREFIX} Error loading PDF: {err}"),
+    //     Ok(doc) => doc,
+    // };
+    // doc.page_iter().enumerate().map(|(i, _)| {
+    //     let page_no = i + 1;
+    //     match doc.extract_text(&[page_no as u32]) {
+    //       Err(err) => error!("{ERR_PREFIX} Error extracting text from PDF on page {page_no}: {err}"),
+    //       Ok(text) => text
+    //     }
+    // }).collect()
+    match pdf_extract::extract_text_from_mem(&document) {
+        Err(err) => error!("{ERR_PREFIX} Error extracting text from PDF: {err}"),
+        Ok(text) => text,
+    }
 }
 
 // === Tests ===
