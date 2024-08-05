@@ -82,13 +82,21 @@ fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
 }
 
 #[pg_extern(immutable, strict)]
-fn embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
+fn _embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
     let vectors = embeddings_bge_small_en_v15(vec![input]);
     match vectors.into_iter().next() {
         None => error!("{ERR_PREFIX} Unexpected empty result vector"),
         Some(vector) => vector,
     }
 }
+
+extension_sql!(
+    "CREATE FUNCTION embedding_bge_small_en_v15(input text) RETURNS vector(384) 
+    LANGUAGE SQL VOLATILE STRICT PARALLEL SAFE AS $$
+      SELECT _embedding_bge_small_en_v15(input)::vector(384);
+    $$;", 
+    name = "embedding_bge_small_en_v15_with_cast"
+);
 
 // === Local reranking ===
 
@@ -211,7 +219,7 @@ fn chunks_by_tokens(document: &str, max_tokens: i32, max_overlap: i32) -> Vec<&s
     })
 }
 
-// === Local PDF text extraction
+// === Local PDF text extraction ===
 
 #[pg_extern(immutable, strict)]
 fn extract_pdf_text(document: &[u8]) -> String {
@@ -230,6 +238,16 @@ fn extract_pdf_text(document: &[u8]) -> String {
     match pdf_extract::extract_text_from_mem(&document) {
         Err(err) => error!("{ERR_PREFIX} Error extracting text from PDF: {err}"),
         Ok(text) => text,
+    }
+}
+
+// === Local HTML to Markdown ===
+
+#[pg_extern(immutable, strict)]
+fn markdown_from_html(document: &str) -> String {
+    match htmd::convert(document) {
+        Err(err) => error!("{ERR_PREFIX} Error converting HTML to Markdown: {err}"),
+        Ok(md) => md
     }
 }
 
@@ -271,17 +289,17 @@ mod tests {
 
     #[pg_test]
     fn test_embedding_bge_small_en_v15_length() {
-        assert!(crate::embedding_bge_small_en_v15("hello world!").len() == 384);
+        assert!(crate::_embedding_bge_small_en_v15("hello world!").len() == 384);
     }
 
     #[pg_test]
     fn test_embedding_bge_small_en_v15_immutability() {
-        assert!(crate::embedding_bge_small_en_v15("hello world!") == crate::embedding_bge_small_en_v15("hello world!"));
+        assert!(crate::_embedding_bge_small_en_v15("hello world!") == crate::_embedding_bge_small_en_v15("hello world!"));
     }
 
     #[pg_test]
     fn test_embedding_bge_small_en_v15_variability() {
-        assert!(crate::embedding_bge_small_en_v15("hello world!") != crate::embedding_bge_small_en_v15("bye moon!"));
+        assert!(crate::_embedding_bge_small_en_v15("hello world!") != crate::_embedding_bge_small_en_v15("bye moon!"));
     }
 
     #[pg_test]
