@@ -6,9 +6,6 @@ use std::cell::OnceCell;
 use text_splitter::{ChunkConfig, TextSplitter};
 use tokenizers::{AddedToken, Tokenizer};
 
-use lopdf::{Bookmark, Document, Object, ObjectId};
-use std::collections::BTreeMap;
-
 pgrx::pg_module_magic!();
 extension_sql_file!("lib.sql");
 const ERR_PREFIX: &'static str = "[NEON_AI]";
@@ -34,13 +31,12 @@ macro_rules! local_model {
     };
 }
 
-// === OpenAI embeddings ===
+// === OpenAI ===
 
 #[pg_extern(immutable, strict)]
 fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
     let auth = format!("Bearer {key}");
     let json_body = ureq::json!({ "model": model, "input": input });
-
     let response = match ureq::post("https://api.openai.com/v1/embeddings")
         .set("Authorization", auth.as_str())
         .send_json(json_body)
@@ -60,10 +56,33 @@ fn embedding_openai_raw(model: &str, input: &str, key: &str) -> pgrx::JsonB {
     }
 }
 
+#[pg_extern(immutable, strict)]
+fn chatgpt_raw(json_body: pgrx::Json, key: &str) -> pgrx::Json {
+    let auth = format!("Bearer {key}");
+    let response = match ureq::post("https://api.openai.com/v1/chat/completions")
+        .set("Authorization", auth.as_str())
+        .send_json(json_body)
+    {
+        Err(ureq::Error::Transport(err)) => {
+            let msg = err.message().unwrap_or("no further details");
+            error!("{ERR_PREFIX} Transport error communicating with OpenAI API: {msg}");
+        }
+        Err(ureq::Error::Status(code, _)) => {
+            error!("{ERR_PREFIX} HTTP status code {code} trying to reach OpenAI API")
+        }
+        Ok(response) => response,
+    };
+    match response.into_json() {
+        Err(err) => error!("{ERR_PREFIX} Failed to parse JSON received from OpenAI API: {err}"),
+        Ok(value) => pgrx::Json(value),
+    }
+}
+
 // === Local embeddings ===
 
 // NOTE. It might be nice to expose this function directly, but as at 2024-07-08 pgrx
 // doesn't support Vec<Vec<_>>: https://github.com/pgcentralfoundation/pgrx/issues/1762.
+
 // #[pg_extern(immutable, strict, name = "embedding_bge_small_en_v15")]
 fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
     thread_local! {
@@ -85,21 +104,13 @@ fn embeddings_bge_small_en_v15(input: Vec<&str>) -> Vec<Vec<f32>> {
 }
 
 #[pg_extern(immutable, strict)]
-fn _embedding_bge_small_en_v15(input: &str) -> Vec<f32> {
+fn embedding_bge_small_en_v15_raw(input: &str) -> Vec<f32> {
     let vectors = embeddings_bge_small_en_v15(vec![input]);
     match vectors.into_iter().next() {
         None => error!("{ERR_PREFIX} Unexpected empty result vector"),
         Some(vector) => vector,
     }
 }
-
-extension_sql!(
-    "CREATE FUNCTION embedding_bge_small_en_v15(input text) RETURNS vector(384) 
-    LANGUAGE SQL VOLATILE STRICT PARALLEL SAFE AS $$
-      SELECT _embedding_bge_small_en_v15(input)::vector(384);
-    $$;",
-    name = "embedding_bge_small_en_v15_with_cast"
-);
 
 // === Local reranking ===
 
@@ -140,7 +151,17 @@ fn rerank_score_jina_v1_tiny_en(query: &str, document: &str) -> f32 {
     let scores = rerank_scores_jina_v1_tiny_en(query, vec![document]);
     match scores.first() {
         None => error!("{ERR_PREFIX} Unexpectedly empty reranking vector"),
-        Some(score) => *score,
+        Some(score) => -*score,
+    }
+}
+
+// === Local PDF text extraction ===
+
+#[pg_extern(immutable, strict)]
+fn text_from_pdf(document: &[u8]) -> String {
+    match pdf_extract::extract_text_from_mem(&document) {
+        Err(err) => error!("{ERR_PREFIX} Error extracting text from PDF: {err}"),
+        Ok(text) => text,
     }
 }
 
@@ -161,7 +182,7 @@ fn chunks_by_characters(document: &str, max_characters: i32, max_overlap: i32) -
 }
 
 #[pg_extern(immutable, strict)]
-fn chunks_by_tokens(document: &str, max_tokens: i32, max_overlap: i32) -> Vec<&str> {
+fn chunks_by_tokens_bge_small_en_v15(document: &str, max_tokens: i32, max_overlap: i32) -> Vec<&str> {
     thread_local! {
         static CELL: OnceCell<(Tokenizer, i32)> = const { OnceCell::new() };
     }
@@ -217,183 +238,8 @@ fn chunks_by_tokens(document: &str, max_tokens: i32, max_overlap: i32) -> Vec<&s
             Ok(config) => config,
         };
         let splitter = TextSplitter::new(size_config.with_sizer(tokenizer));
-        let chunks = splitter.chunks(document).collect();
-        chunks
+        splitter.chunks(document).collect()
     })
-}
-
-// === Local PDF manipulation ===
-
-#[pg_extern(immutable, strict)]
-fn pdf_from_pages(files: Vec<&[u8]>) -> Vec<u8> {
-    let mut max_id = 1;
-    let mut pagenum = 1;
-
-    // Collect all Documents Objects grouped by a map
-    let mut documents_pages: BTreeMap<ObjectId, Object> = BTreeMap::new();
-    let mut documents_objects: BTreeMap<ObjectId, Object> = BTreeMap::new();
-    let mut document = Document::with_version("2.0");
-
-    for file in files {
-        let mut doc = match Document::load_mem(file) {
-            Err(err) => error!("{ERR_PREFIX} Error opening PDF: {err}"),
-            Ok(pdf) => pdf,
-        };
-        let mut first = false;
-        doc.renumber_objects_with(max_id);
-
-        max_id = doc.max_id + 1;
-
-        documents_pages.extend(
-            doc.get_pages()
-                .into_iter()
-                .map(|(_, object_id)| {
-                    if !first {
-                        let bookmark =
-                            Bookmark::new(String::from(format!("Page_{}", pagenum)), [0.0, 0.0, 1.0], 0, object_id);
-                        document.add_bookmark(bookmark, None);
-                        first = true;
-                        pagenum += 1;
-                    }
-
-                    (object_id, doc.get_object(object_id).unwrap().to_owned())
-                })
-                .collect::<BTreeMap<ObjectId, Object>>(),
-        );
-        documents_objects.extend(doc.objects);
-    }
-
-    // Catalog and Pages are mandatory
-    let mut catalog_object: Option<(ObjectId, Object)> = None;
-    let mut pages_object: Option<(ObjectId, Object)> = None;
-
-    // Process all objects except "Page" type
-    for (object_id, object) in documents_objects.iter() {
-        // We have to ignore "Page" (as are processed later), "Outlines" and "Outline" objects
-        // All other objects should be collected and inserted into the main Document
-        match object.type_name().unwrap_or("") {
-            "Catalog" => {
-                // Collect a first "Catalog" object and use it for the future "Pages"
-                catalog_object = Some((
-                    if let Some((id, _)) = catalog_object {
-                        id
-                    } else {
-                        *object_id
-                    },
-                    object.clone(),
-                ));
-            }
-            "Pages" => {
-                // Collect and update a first "Pages" object and use it for the future "Catalog"
-                // We have also to merge all dictionaries of the old and the new "Pages" object
-                if let Ok(dictionary) = object.as_dict() {
-                    let mut dictionary = dictionary.clone();
-                    if let Some((_, ref object)) = pages_object {
-                        if let Ok(old_dictionary) = object.as_dict() {
-                            dictionary.extend(old_dictionary);
-                        }
-                    }
-                    pages_object = Some((
-                        if let Some((id, _)) = pages_object {
-                            id
-                        } else {
-                            *object_id
-                        },
-                        Object::Dictionary(dictionary),
-                    ));
-                }
-            }
-            "Page" => {}     // Ignored, processed later and separately
-            "Outlines" => {} // Ignored, not supported yet
-            "Outline" => {}  // Ignored, not supported yet
-            _ => {
-                document.objects.insert(*object_id, object.clone());
-            }
-        }
-    }
-
-    // If no "Pages" object found abort
-    if pages_object.is_none() {
-        error!("{ERR_PREFIX} Error loading PDF: no pages root object found");
-    }
-
-    // Iterate over all "Page" objects and collect into the parent "Pages" created before
-    for (object_id, object) in documents_pages.iter() {
-        if let Ok(dictionary) = object.as_dict() {
-            let mut dictionary = dictionary.clone();
-            dictionary.set("Parent", pages_object.as_ref().unwrap().0);
-
-            document.objects.insert(*object_id, Object::Dictionary(dictionary));
-        }
-    }
-
-    // If no "Catalog" found abort
-    if catalog_object.is_none() {
-        error!("{ERR_PREFIX} Error loading PDF: no catalog root object found");
-    }
-
-    let catalog_object = catalog_object.unwrap();
-    let pages_object = pages_object.unwrap();
-
-    // Build a new "Pages" with updated fields
-    if let Ok(dictionary) = pages_object.1.as_dict() {
-        let mut dictionary = dictionary.clone();
-
-        // Set new pages count
-        dictionary.set("Count", documents_pages.len() as u32);
-
-        // Set new "Kids" list (collected from documents pages) for "Pages"
-        dictionary.set(
-            "Kids",
-            documents_pages
-                .into_iter()
-                .map(|(object_id, _)| Object::Reference(object_id))
-                .collect::<Vec<_>>(),
-        );
-
-        document.objects.insert(pages_object.0, Object::Dictionary(dictionary));
-    }
-
-    // Build a new "Catalog" with updated fields
-    if let Ok(dictionary) = catalog_object.1.as_dict() {
-        let mut dictionary = dictionary.clone();
-        dictionary.set("Pages", pages_object.0);
-        dictionary.remove(b"Outlines"); // Outlines not supported in merged PDFs
-
-        document
-            .objects
-            .insert(catalog_object.0, Object::Dictionary(dictionary));
-    }
-
-    document.trailer.set("Root", catalog_object.0);
-
-    // Update the max internal ID as wasn't updated before due to direct objects insertion
-    document.max_id = document.objects.len() as u32;
-
-    // Reorder all new Document objects
-    document.renumber_objects();
-
-    // Set any Bookmarks to the First child if they are not set to a page
-    document.adjust_zero_pages();
-
-    // Set all bookmarks to the PDF Object tree then set the Outlines to the Bookmark content map.
-    if let Some(n) = document.build_outline() {
-        if let Ok(x) = document.get_object_mut(catalog_object.0) {
-            if let Object::Dictionary(ref mut dict) = x {
-                dict.set("Outlines", Object::Reference(n));
-            }
-        }
-    }
-
-    document.compress();
-
-    let mut output = Vec::new();
-    match document.save_to(&mut output) {
-        Err(err) => error!("{ERR_PREFIX} Error writing PDF: {err}"),
-        Ok(x) => x,
-    };
-
-    output
 }
 
 // === Local HTML to Markdown ===
@@ -444,19 +290,22 @@ mod tests {
 
     #[pg_test]
     fn test_embedding_bge_small_en_v15_length() {
-        assert!(crate::_embedding_bge_small_en_v15("hello world!").len() == 384);
+        assert!(crate::embedding_bge_small_en_v15_raw("hello world!").len() == 384);
     }
 
     #[pg_test]
     fn test_embedding_bge_small_en_v15_immutability() {
         assert!(
-            crate::_embedding_bge_small_en_v15("hello world!") == crate::_embedding_bge_small_en_v15("hello world!")
+            crate::embedding_bge_small_en_v15_raw("hello world!")
+                == crate::embedding_bge_small_en_v15_raw("hello world!")
         );
     }
 
     #[pg_test]
     fn test_embedding_bge_small_en_v15_variability() {
-        assert!(crate::_embedding_bge_small_en_v15("hello world!") != crate::_embedding_bge_small_en_v15("bye moon!"));
+        assert!(
+            crate::embedding_bge_small_en_v15_raw("hello world!") != crate::embedding_bge_small_en_v15_raw("bye moon!")
+        );
     }
 
     #[pg_test]
@@ -492,7 +341,7 @@ mod tests {
     #[pg_test]
     fn test_chunk_by_tokens() {
         assert!(
-            crate::chunks_by_tokens(
+            crate::chunks_by_tokens_bge_small_en_v15(
                 "The quick brown fox jumps over the lazy dog. In other news, the dish ran away with the spoon.",
                 8,
                 2
